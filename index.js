@@ -658,7 +658,17 @@ client.on('messageCreate', async message => {
                 await message.delete();
                 const warnMsg = await message.channel.send(`${message.author}, your message contained prohibited words.`);
                 setTimeout(() => warnMsg.delete().catch(() => {}), guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT);
-            } catch (err) { console.error('Error deleting message:', err); }
+            } catch (err) {
+                console.error('Error deleting message:', err);
+                if (err.code === 50013 || (err.rawError && err.rawError.code === 50013) || (err.message && err.message.includes('Missing Permissions'))) {
+                    // Try to find a channel where the bot can send messages
+                    const channels = message.guild.channels.cache.filter(c => c.isTextBased && c.permissionsFor && c.permissionsFor(message.guild.members.me).has('SendMessages'));
+                    const fallbackChannel = channels.find(c => c.type === 0) || channels.first();
+                    if (fallbackChannel) {
+                        fallbackChannel.send('⚠️ I tried to delete or warn in a channel but lack permissions. Please check my permissions!');
+                    }
+                }
+            }
         }
     } catch (err) {
         console.error('Error in messageCreate handler:', err);
@@ -705,7 +715,17 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
                 await newMessage.delete();
                 const warnMsg = await newMessage.channel.send(`${newMessage.author}, your edited message contained prohibited words.`);
                 setTimeout(() => warnMsg.delete().catch(() => {}), guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT);
-            } catch (err) { console.error('Error deleting edited message:', err); }
+            } catch (err) {
+                console.error('Error deleting edited message:', err);
+                if (err.code === 50013 || (err.rawError && err.rawError.code === 50013) || (err.message && err.message.includes('Missing Permissions'))) {
+                    // Try to find a channel where the bot can send messages
+                    const channels = newMessage.guild.channels.cache.filter(c => c.isTextBased && c.permissionsFor && c.permissionsFor(newMessage.guild.members.me).has('SendMessages'));
+                    const fallbackChannel = channels.find(c => c.type === 0) || channels.first();
+                    if (fallbackChannel) {
+                        fallbackChannel.send('⚠️ I tried to delete or warn in a channel but lack permissions. Please check my permissions!');
+                    }
+                }
+            }
         }
     } catch (err) {
         console.error('Error in messageUpdate handler:', err);
