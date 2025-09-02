@@ -190,12 +190,41 @@ function generateRegex(word, level) {
     return pattern;
 }
 
-// Combine regex for a guild
-function getCombinedRegex(guildId) {
+// Combine regex for a guild and channel
+function getCombinedRegex(guildId, channelId) {
     const guildData = data.guilds[guildId];
     if (!guildData) return null;
-    const wordPatterns = guildData.blockedWords.map(bw => `(?:${generateRegex(bw.word, bw.level)})`);
-    const allPatterns = [...wordPatterns, ...(guildData.customRegexes || []).map(r => `(?:${r})`)];
+    // Only include blacklisted words for this channel (or all)
+    const wordPatterns = (guildData.blockedWords || []).filter(bw => {
+        if (!bw.channels) return true;
+        if (bw.channels === 'all') return true;
+        return Array.isArray(bw.channels) && bw.channels.includes(channelId);
+    }).map(bw => `(?:${generateRegex(bw.word, bw.level)})`);
+    // Only include regexes for this channel (or all)
+    const regexPatternsLocal = (guildData.customRegexes || []).map(r => {
+        if (typeof r === 'string') return r; // legacy
+        if (!r.channels) return r.pattern;
+        if (r.channels === 'all') return r.pattern;
+        if (Array.isArray(r.channels) && r.channels.includes(channelId)) return r.pattern;
+        return null;
+    }).filter(Boolean).map(p => `(?:${p})`);
+    const allPatternsLocal = [...wordPatterns, ...regexPatternsLocal];
+    if (allPatternsLocal.length === 0) return null;
+    try {
+        return new RegExp(allPatternsLocal.join('|'), 'iu');
+    } catch (e) {
+        console.error('Invalid combined regex:', e);
+        return null;
+    }
+    // Only include regexes for this channel (or all)
+    const regexPatterns = (guildData.customRegexes || []).map(r => {
+        if (typeof r === 'string') return r; // legacy
+        if (!r.channels) return r.pattern;
+        if (r.channels === 'all') return r.pattern;
+        if (Array.isArray(r.channels) && r.channels.includes(channelId)) return r.pattern;
+        return null;
+    }).filter(Boolean).map(p => `(?:${p})`);
+    const allPatterns = [...wordPatterns, ...regexPatterns];
     if (allPatterns.length === 0) return null;
     try {
         return new RegExp(allPatterns.join('|'), 'iu');
@@ -220,7 +249,8 @@ const commands = [
         )),
     new SlashCommandBuilder().setName('addblacklist').setDescription('Add a word to the blacklist with strictness 0–5')
         .addStringOption(option => option.setName('word').setDescription('Word to blacklist').setRequired(true))
-        .addIntegerOption(option => option.setName('level').setDescription('Strictness level 0–5').setRequired(true).setMinValue(0).setMaxValue(5)),
+        .addIntegerOption(option => option.setName('level').setDescription('Strictness level 0–5').setRequired(true).setMinValue(0).setMaxValue(5))
+        .addChannelOption(option => option.setName('channel').setDescription('Channel to apply blacklist to (leave empty for all monitored channels)').setRequired(false).addChannelTypes(0)),
     new SlashCommandBuilder().setName('removeblacklist').setDescription('Remove a word from the blacklist')
         .addStringOption(option => option.setName('word').setDescription('Word to remove from blacklist').setRequired(true)),
     new SlashCommandBuilder().setName('addwhitelist').setDescription('Add a word to the whitelist (allowed even if blacklisted)')
@@ -228,7 +258,8 @@ const commands = [
     new SlashCommandBuilder().setName('removewhitelist').setDescription('Remove a word from the whitelist')
         .addStringOption(option => option.setName('word').setDescription('Word to remove from whitelist').setRequired(true)),
     new SlashCommandBuilder().setName('addregex').setDescription('Add a custom regex')
-        .addStringOption(option => option.setName('pattern').setDescription('Regex pattern').setRequired(true)),
+        .addStringOption(option => option.setName('pattern').setDescription('Regex pattern').setRequired(true))
+        .addChannelOption(option => option.setName('channel').setDescription('Channel to apply regex to (leave empty for all monitored channels)').setRequired(false).addChannelTypes(0)),
     new SlashCommandBuilder().setName('removeregex').setDescription('Remove a custom regex by index')
         .addIntegerOption(option => option.setName('index').setDescription('Index starting from 1').setRequired(true)),
     new SlashCommandBuilder().setName('help').setDescription('Show help and command usage'),
@@ -294,13 +325,29 @@ client.on('interactionCreate', async interaction => {
         case 'addblacklist': {
             const word = interaction.options.getString('word').toLowerCase();
             const level = interaction.options.getInteger('level');
-            if (guildData.blockedWords.some(bw => bw.word === word)) {
-                await interaction.reply({ content: `❌ The word "${word}" is already blacklisted.` });
+            const channel = interaction.options.getChannel('channel');
+            let channels = null;
+            if (channel) {
+                channels = [channel.id];
+            } else {
+                channels = 'all';
+            }
+            // Allow same word in different channels
+            if (guildData.blockedWords.some(bw => bw.word === word && (
+                (channels === 'all' || bw.channels === 'all') ||
+                (Array.isArray(bw.channels) && Array.isArray(channels) && bw.channels.some(c => channels.includes(c)))
+            ))) {
+                await interaction.reply({ content: `❌ The word "${word}" is already blacklisted for the same channel(s) or all channels.` });
                 break;
             }
-            guildData.blockedWords.push({ word, level });
+            guildData.blockedWords.push({ word, level, channels });
             saveData();
-            let msg = `✅ Word "${word}" added to blacklist with strictness level ${level}.`;
+            let msg = `✅ Word "${word}" added to blacklist with strictness level ${level}`;
+            if (channels && channels !== 'all') {
+                msg += ` (applies to channel: <#${channels[0]}>)`;
+            } else {
+                msg += ' (applies to all monitored channels)';
+            }
             if (
                 (!guildData.monitoredChannels || guildData.monitoredChannels.length === 0)
                 && (guildData.filterMode !== 'all')
@@ -359,13 +406,15 @@ Remove a channel from the list.
 **/settimeout <ms>**  
 Set how long (in ms) before the bot deletes its warning message.
 
-**/addblacklist <word> <level 0-5>**  
-Add a word to the blacklist.  
+
+**/addblacklist <word> <level 0-5> [channel]**  
+Add a word to the blacklist, with optional channel restriction. If no channel is selected, the word is blocked in all monitored channels.  
 Strictness levels:
 - 0: Exact match
 - 1: Common substitutions (e.g. a/A/4)
 - 2-4: Increasingly aggressive substitutions (e.g. leetspeak, symbols, unicode)
 - 5: Most aggressive, includes many lookalikes
+> **Note:** The channel list (monitored channels) and filter mode always overrule per-word channel settings. If a channel is not monitored, no blacklist or regex will apply there, even if selected for a word.
 
 **/removeblacklist <word>**  
 Remove a word from the blacklist.
@@ -376,8 +425,10 @@ Add a word to the whitelist (allowed even if blacklisted).
 **/removewhitelist <word>**  
 Remove a word from the whitelist.
 
-**/addregex <pattern>**  
-Add a custom regex pattern to block.
+
+**/addregex <pattern> [channel]**  
+Add a custom regex pattern to block, with optional channel restriction. If no channel is selected, the regex is blocked in all monitored channels.
+> **Note:** The channel list (monitored channels) and filter mode always overrule per-regex channel settings.
 
 **/removeregex <index>**  
 Remove a custom regex by its index (see your settings).
@@ -468,15 +519,28 @@ __**Defaults:**__
         }
         case 'addregex': {
             const pattern = interaction.options.getString('pattern');
-            if (guildData.customRegexes.includes(pattern)) {
+            const channel = interaction.options.getChannel('channel');
+            let channels = null;
+            if (channel) {
+                channels = [channel.id];
+            } else {
+                channels = 'all';
+            }
+            if ((guildData.customRegexes || []).some(r => (typeof r === 'string' ? r : r.pattern) === pattern)) {
                 await interaction.reply({ content: '❌ This regex pattern is already blocked.' });
                 break;
             }
             try {
                 new RegExp(pattern);
-                guildData.customRegexes.push(pattern);
+                if (!guildData.customRegexes) guildData.customRegexes = [];
+                guildData.customRegexes.push({ pattern, channels });
                 saveData();
                 let msg = '✅ Custom regex added.';
+                if (channels && channels !== 'all') {
+                    msg += ` (applies to channel: <#${channels[0]}>)`;
+                } else {
+                    msg += ' (applies to all monitored channels)';
+                }
                 if (
                     (!guildData.monitoredChannels || guildData.monitoredChannels.length === 0)
                     && (guildData.filterMode !== 'all')
@@ -504,13 +568,36 @@ __**Defaults:**__
             const filterMode = guildData.filterMode || 'all';
             const timeout = guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT;
             const monitoredChannels = guildData.monitoredChannels?.map(id => `<#${id}>`).join(', ') || 'None';
-            const blockedWords = guildData.blockedWords?.map(bw => `"${bw.word}" (level ${bw.level})`).join(', ') || 'None';
+            const blockedWords = (guildData.blockedWords && guildData.blockedWords.length)
+    ? guildData.blockedWords.map(bw => {
+        let ch = '';
+        if (bw.channels) {
+            if (bw.channels === 'all') {
+                ch = ' [all channels]';
+            } else if (Array.isArray(bw.channels)) {
+                ch = ` [channel: <#${bw.channels[0]}>]`;
+            }
+        }
+        return `"${bw.word}" (level ${bw.level})${ch}`;
+    }).join(', ')
+    : 'None';
             const whitelistWords = (guildData.whitelist && guildData.whitelist.length)
                 ? guildData.whitelist.map(w => `"${w}"`).join(', ')
                 : 'None';
             const customRegexes = (guildData.customRegexes && guildData.customRegexes.length)
-                ? guildData.customRegexes.map((r, i) => `\`${r}\` (${i+1})`).join(', ')
-                : 'None';
+    ? guildData.customRegexes.map((r, i) => {
+        if (typeof r === 'string') return `\`${r}\` (${i+1})`;
+        let ch = '';
+        if (r.channels) {
+            if (r.channels === 'all') {
+                ch = ' [all channels]';
+            } else if (Array.isArray(r.channels)) {
+                ch = ` [channel: <#${r.channels[0]}>]`;
+            }
+        }
+        return `\`${r.pattern}\`${ch} (${i+1})`;
+    }).join(', ')
+    : 'None';
             const immuneRoles = guildData.immuneRoles?.map(rid => `<@&${rid}>`).join(', ') || 'None';
             const settingsEmbed = new EmbedBuilder()
                 .setTitle('Server Settings')
@@ -551,7 +638,7 @@ client.on('messageCreate', async message => {
         if (guildData.immuneRoles && message.member && message.member.roles.cache.some(role => guildData.immuneRoles.includes(role.id))) {
             return;
         }
-        const regex = getCombinedRegex(guildId);
+    const regex = getCombinedRegex(guildId, message.channel.id);
         if (!regex) {
             const msg = await message.channel.send('❌ Regex filter is invalid. Please fix your custom regexes.');
             setTimeout(() => msg.delete().catch(() => {}), guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT);
@@ -594,7 +681,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
         ) {
             return;
         }
-        const regex = getCombinedRegex(guildId);
+    const regex = getCombinedRegex(guildId, newMessage.channel.id);
         if (!regex) {
             const msg = await newMessage.channel.send('❌ Regex filter is invalid. Please fix your custom regexes.');
             setTimeout(() => msg.delete().catch(() => {}), guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT);
