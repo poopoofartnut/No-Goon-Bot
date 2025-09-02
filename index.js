@@ -414,7 +414,7 @@ Strictness levels:
 - 1: Common substitutions (e.g. a/A/4)
 - 2-4: Increasingly aggressive substitutions (e.g. leetspeak, symbols, unicode)
 - 5: Most aggressive, includes many lookalikes
-> **Note:** The channel list (monitored channels) and filter mode always overrule per-word channel settings. If a channel is not monitored, no blacklist or regex will apply there, even if selected for a word.
+> **Note:** If a word or regex is set for a specific channel, it will always be filtered in that channel, even if the channel is not monitored. The monitored channel list/filter mode only applies to words/regexes set for "all monitored channels".
 
 **/removeblacklist <word>**  
 Remove a word from the blacklist.
@@ -428,7 +428,7 @@ Remove a word from the whitelist.
 
 **/addregex <pattern> [channel]**  
 Add a custom regex pattern to block, with optional channel restriction. If no channel is selected, the regex is blocked in all monitored channels.
-> **Note:** The channel list (monitored channels) and filter mode always overrule per-regex channel settings.
+> **Note:** If a word or regex is set for a specific channel, it will always be filtered in that channel, even if the channel is not monitored. The monitored channel list/filter mode only applies to words/regexes set for "all monitored channels".
 
 **/removeregex <index>**  
 Remove a custom regex by its index (see your settings).
@@ -620,7 +620,8 @@ __**Defaults:**__
 // ------------------- Message Filtering -------------------
 const DEFAULT_DELETE_TIMEOUT = 2000;
 
-function shouldFilterChannel(guildData, channelId) {
+function shouldFilterChannel(guildData, channelId, forWordOrRegex = false) {
+    if (forWordOrRegex) return true;
     const mode = guildData.filterMode || 'all';
     if (mode === 'all') {
         return !(guildData.monitoredChannels || []).includes(channelId);
@@ -634,11 +635,15 @@ client.on('messageCreate', async message => {
         if (message.author.bot || !message.guild) return;
         const guildId = message.guild.id;
         const guildData = data.guilds[guildId];
-        if (!guildData || !shouldFilterChannel(guildData, message.channel.id)) return;
+        if (!guildData) return;
         if (guildData.immuneRoles && message.member && message.member.roles.cache.some(role => guildData.immuneRoles.includes(role.id))) {
             return;
         }
-    const regex = getCombinedRegex(guildId, message.channel.id);
+        // If any word/regex is set for this channel, always filter for it
+        const regex = getCombinedRegex(guildId, message.channel.id);
+        const hasSpecific = (guildData.blockedWords || []).some(bw => Array.isArray(bw.channels) && bw.channels.includes(message.channel.id)) ||
+            (guildData.customRegexes || []).some(r => typeof r !== 'string' && Array.isArray(r.channels) && r.channels.includes(message.channel.id));
+        if (!shouldFilterChannel(guildData, message.channel.id, hasSpecific)) return;
         if (!regex) {
             const msg = await message.channel.send('❌ Regex filter is invalid. Please fix your custom regexes.');
             setTimeout(() => msg.delete().catch(() => {}), guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT);
@@ -673,7 +678,11 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
         if (oldMessage.content === newMessage.content) return;
         const guildId = newMessage.guild.id;
         const guildData = data.guilds[guildId];
-        if (!guildData || !shouldFilterChannel(guildData, newMessage.channel.id)) return;
+        if (!guildData) return;
+        // If any word/regex is set for this channel, always filter for it
+        const hasSpecific = (guildData.blockedWords || []).some(bw => Array.isArray(bw.channels) && bw.channels.includes(newMessage.channel.id)) ||
+            (guildData.customRegexes || []).some(r => typeof r !== 'string' && Array.isArray(r.channels) && r.channels.includes(newMessage.channel.id));
+        if (!shouldFilterChannel(guildData, newMessage.channel.id, hasSpecific)) return;
         if (
             guildData.immuneRoles &&
             newMessage.member &&
@@ -681,7 +690,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
         ) {
             return;
         }
-    const regex = getCombinedRegex(guildId, newMessage.channel.id);
+        const regex = getCombinedRegex(guildId, newMessage.channel.id);
         if (!regex) {
             const msg = await newMessage.channel.send('❌ Regex filter is invalid. Please fix your custom regexes.');
             setTimeout(() => msg.delete().catch(() => {}), guildData.deleteTimeout ?? DEFAULT_DELETE_TIMEOUT);
